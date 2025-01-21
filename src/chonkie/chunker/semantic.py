@@ -320,70 +320,108 @@ class SemanticChunker(BaseChunker):
         return splits
 
     def _calculate_threshold_via_binary_search(
-        self, sentences: List[Sentence]
+        self, 
+        sentences: List[Sentence], 
+        max_iterations: int = 10
     ) -> float:
-        """Calculate similarity threshold via binary search."""
-        # Get the token counts and cumulative token counts
-        token_counts = [sent.token_count for sent in sentences]
-        cumulative_token_counts = np.cumsum([0] + token_counts)
-
-        # Compute all pairwise similarities
+        """Calculate similarity threshold via binary search.
+        
+        Args:
+            sentences: List of Sentence objects containing token counts and embeddings
+            max_iterations: Maximum number of binary search iterations (default: 10)
+            
+        Returns:
+            float: Optimal similarity threshold for chunking
+            
+        Raises:
+            ValueError: If sentences list is empty or if all sentences are too large
+            ValueError: If max_iterations is less than 1
+        """
+        if not sentences:
+            raise ValueError("Cannot calculate threshold for empty sentence list")
+        
+        if max_iterations < 1:
+            raise ValueError("max_iterations must be at least 1")
+        
+        # Validate individual sentence sizes
+        oversized_sentences = [
+            sent for sent in sentences 
+            if sent.token_count > self.chunk_size
+        ]
+        if oversized_sentences:
+            raise ValueError(
+                f"Found {len(oversized_sentences)} sentences exceeding maximum chunk size. "
+                f"Largest sentence has {max(s.token_count for s in oversized_sentences)} tokens."
+            )
+        
+        # Compute initial statistics
         similarities = self._compute_window_similarities(sentences)
-
-        # get the median and the std for the similarities
         median = np.median(similarities)
         std = np.std(similarities)
-
-        # the threshold is set between 1 std of the median
-        low = max(median - 1 * std, 0.0)
-        high = min(median + 1 * std, 1.0)
-
-        # set iterations
-        iterations = 0
-
-        # initialize threshold
-        threshold = (low + high) / 2
         
-        while abs(high - low) > self.threshold_step:
+        # Set search boundaries within 1 standard deviation
+        low = max(median - std, 0.0)
+        high = min(median + std, 1.0)
+        best_threshold = (low + high) / 2  # Initialize best threshold
+        min_invalid_chunks = float('inf')  # Track best solution
+        
+        # Get token information once, outside the loop
+        token_counts = [sent.token_count for sent in sentences]
+        cumulative_tokens = np.cumsum([0] + token_counts)
+        
+        def check_chunk_sizes(split_counts: np.ndarray) -> tuple[bool, bool, int]:
+            """Helper function to evaluate chunk sizes.
+            
+            Returns:
+                tuple[bool, bool, int]: (chunks_too_large, chunks_too_small, invalid_chunk_count)
+            """
+            too_large = any(count > self.chunk_size for count in split_counts)
+            too_small = any(count < self.min_chunk_size for count in split_counts)
+            invalid_count = sum(
+                1 for count in split_counts 
+                if count > self.chunk_size or count < self.min_chunk_size
+            )
+            return too_large, too_small, invalid_count
+        
+        # Binary search loop
+        for _ in range(max_iterations):
             threshold = (low + high) / 2
-            # Get the split indices
+            
+            # Get splits and calculate chunk sizes
             split_indices = self._get_split_indices(similarities, threshold)
+            split_token_counts = np.diff(cumulative_tokens[split_indices])
             
-            # Get the cumulative token count`s at the split indices
-
-            split_token_counts = np.diff(cumulative_token_counts[split_indices])
+            # Check if chunks meet size requirements
+            chunks_too_large, chunks_too_small, invalid_chunks = check_chunk_sizes(split_token_counts)
             
-            # Get the median of the split token counts
-            # median_split_token_count = np.median(split_token_counts)
-            # Check if the split respects the chunk size
-            # if self.min_chunk_size * 1.1 <= median_split_token_count <= 0.95 * self.chunk_size:
-            # break
-            # elif median_split_token_count > 0.95 * self.chunk_size:
-            # The code is calculating the median of a list of token counts stored in the variable
-            # `split_token_counts` using the `np.median()` function from the NumPy library in Python.
-            #     low = threshold + self.threshold_step
-            # else:
-            #     high = threshold - self.threshold_step
-
-            # check if all the split token counts are between the min and max chunk size
-            if self.min_chunk_size <= all(split_token_counts) <= self.chunk_size:
-                break
-            # check if any of the split token counts are greater than the max chunk size
-            elif any(split_token_counts) > self.chunk_size:
+            # Track best solution so far
+            if invalid_chunks < min_invalid_chunks:
+                min_invalid_chunks = invalid_chunks
+                best_threshold = threshold
+            
+            # Perfect solution found
+            if not chunks_too_large and not chunks_too_small:
+                return threshold
+            
+            # Adjust threshold based on chunk sizes
+            if chunks_too_large:
                 low = threshold + self.threshold_step
-            # check if any of the split token counts are less than the min chunk size
             else:
                 high = threshold - self.threshold_step
-
-            iterations += 1
-            if iterations > 10:
-                warnings.warn(
-                    "Too many iterations in threshold calculation, stopping...",
-                    stacklevel=2,
-                )
+            
+            # Check if search range is too small
+            if abs(high - low) <= self.threshold_step:
                 break
-
-        return threshold
+        
+        # If we didn't find a perfect solution, warn and return best attempt
+        if min_invalid_chunks > 0:
+            warnings.warn(
+                f"Could not find perfect threshold after {max_iterations} iterations. "
+                f"Using best approximation with {min_invalid_chunks} invalid chunks.",
+                stacklevel=2,
+            )
+        
+        return best_threshold
 
     def _calculate_threshold_via_percentile(self, sentences: List[Sentence]) -> float:
         """Calculate similarity threshold via percentile."""
