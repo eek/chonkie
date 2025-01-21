@@ -25,6 +25,7 @@ class SemanticChunker(BaseChunker):
         threshold_step: Step size for similarity threshold calculation
         delim: Delimiters to split sentences on
         return_type: Whether to return chunks or texts
+        verbose: Whether to print debug information during chunking
     
     Raises:
         ValueError: If parameters are invalid
@@ -43,6 +44,7 @@ class SemanticChunker(BaseChunker):
         threshold_step: float = 0.01,
         delim: Union[str, List[str]] = [".", "!", "?", "\n"],
         return_type: Literal["chunks", "texts"] = "chunks",
+        verbose: bool = False,
         **kwargs
     ):
         """Initialize the SemanticChunker.
@@ -61,6 +63,7 @@ class SemanticChunker(BaseChunker):
             threshold_step: Step size for similarity threshold calculation
             delim: Delimiters to split sentences on
             return_type: Whether to return chunks or texts
+            verbose: Whether to print debug information during chunking
             **kwargs: Additional keyword arguments
 
         Raises:
@@ -104,6 +107,7 @@ class SemanticChunker(BaseChunker):
         self.delim = delim
         self.sep = "🦛"
         self.return_type = return_type
+        self.verbose = verbose
         
         if isinstance(threshold, float):
             self.similarity_threshold = threshold
@@ -322,13 +326,15 @@ class SemanticChunker(BaseChunker):
     def _calculate_threshold_via_binary_search(
         self, 
         sentences: List[Sentence], 
-        max_iterations: int = 10
+        max_iterations: int = 10,
+        verbose: bool = None
     ) -> float:
         """Calculate similarity threshold via binary search.
         
         Args:
             sentences: List of Sentence objects containing token counts and embeddings
             max_iterations: Maximum number of binary search iterations (default: 10)
+            verbose: Override class-level verbose setting (default: None)
             
         Returns:
             float: Optimal similarity threshold for chunking
@@ -337,6 +343,9 @@ class SemanticChunker(BaseChunker):
             ValueError: If sentences list is empty or if all sentences are too large
             ValueError: If max_iterations is less than 1
         """
+        # At the start of the method, resolve verbose setting
+        verbose = self.verbose if verbose is None else verbose
+        
         if not sentences:
             raise ValueError("Cannot calculate threshold for empty sentence list")
         
@@ -362,64 +371,96 @@ class SemanticChunker(BaseChunker):
         # Set search boundaries within 1 standard deviation
         low = max(median - std, 0.0)
         high = min(median + std, 1.0)
-        best_threshold = (low + high) / 2  # Initialize best threshold
-        min_invalid_chunks = float('inf')  # Track best solution
+        best_threshold = (low + high) / 2
+        best_score = float('inf')
         
         # Get token information once, outside the loop
         token_counts = [sent.token_count for sent in sentences]
         cumulative_tokens = np.cumsum([0] + token_counts)
         
-        def check_chunk_sizes(split_counts: np.ndarray) -> tuple[bool, bool, int]:
-            """Helper function to evaluate chunk sizes.
+        def check_chunk_sizes(split_counts: np.ndarray) -> tuple[float, bool, str]:
+            """Evaluate chunk sizes and return a score.
             
             Returns:
-                tuple[bool, bool, int]: (chunks_too_large, chunks_too_small, invalid_chunk_count)
+                tuple[float, bool, str]: (score, is_valid, reason)
+                - score: Lower is better, 0 is perfect
+                - is_valid: Whether this is a valid solution
+                - reason: Description of why the score was assigned
             """
-            too_large = any(count > self.chunk_size for count in split_counts)
-            too_small = any(count < self.min_chunk_size for count in split_counts)
-            invalid_count = sum(
-                1 for count in split_counts 
-                if count > self.chunk_size or count < self.min_chunk_size
-            )
-            return too_large, too_small, invalid_count
+            if len(split_counts) == 0:
+                return float('inf'), False, "No chunks created"
+            
+            # Count violations
+            too_large = sum(1 for count in split_counts if count > self.chunk_size)
+            too_small = sum(1 for count in split_counts if count < self.min_chunk_size)
+            
+            # Calculate average deviation from ideal size
+            ideal_size = (self.min_chunk_size + self.chunk_size) / 2
+            size_deviations = [abs(count - ideal_size) for count in split_counts]
+            avg_deviation = np.mean(size_deviations) if size_deviations else float('inf')
+            
+            # Calculate score (weighted sum of violations and deviations)
+            score = (too_large * 1000 + too_small * 100 + avg_deviation)
+            
+            is_valid = too_large == 0 and too_small == 0
+            reason = f"{len(split_counts)} chunks: {too_large} too large, {too_small} too small, avg deviation {avg_deviation:.1f}"
+            
+            return score, is_valid, reason
         
         # Binary search loop
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
             threshold = (low + high) / 2
             
             # Get splits and calculate chunk sizes
             split_indices = self._get_split_indices(similarities, threshold)
             split_token_counts = np.diff(cumulative_tokens[split_indices])
             
-            # Check if chunks meet size requirements
-            chunks_too_large, chunks_too_small, invalid_chunks = check_chunk_sizes(split_token_counts)
+            # Evaluate this solution
+            score, is_valid, reason = check_chunk_sizes(split_token_counts)
             
-            # Track best solution so far
-            if invalid_chunks < min_invalid_chunks:
-                min_invalid_chunks = invalid_chunks
+            # Track best solution
+            if score < best_score:
+                best_score = score
                 best_threshold = threshold
+                best_reason = reason
+            
+            # Log progress for debugging
+            if verbose:
+                print(f"Iteration {iteration + 1}: threshold={threshold:.3f}, {reason}")
             
             # Perfect solution found
-            if not chunks_too_large and not chunks_too_small:
+            if is_valid:
                 return threshold
             
-            # Adjust threshold based on chunk sizes
-            if chunks_too_large:
+            # Calculate average chunk size to guide the search
+            avg_chunk_size = np.mean(split_token_counts)
+            
+            # Adjust bounds based on average chunk size
+            if avg_chunk_size > self.chunk_size:
+                # Chunks too large, increase threshold to split more
                 low = threshold + self.threshold_step
-            else:
+            elif avg_chunk_size < self.min_chunk_size:
+                # Chunks too small, decrease threshold to combine more
                 high = threshold - self.threshold_step
+            else:
+                # Size is okay, but not valid - try both directions
+                if score > best_score:
+                    # Last change made things worse, reverse direction
+                    if threshold > best_threshold:
+                        high = threshold - self.threshold_step
+                    else:
+                        low = threshold + self.threshold_step
             
             # Check if search range is too small
             if abs(high - low) <= self.threshold_step:
                 break
         
         # If we didn't find a perfect solution, warn and return best attempt
-        if min_invalid_chunks > 0:
-            warnings.warn(
-                f"Could not find perfect threshold after {max_iterations} iterations. "
-                f"Using best approximation with {min_invalid_chunks} invalid chunks.",
-                stacklevel=2,
-            )
+        warnings.warn(
+            f"Could not find perfect threshold after {max_iterations} iterations. "
+            f"Using best approximation: {best_reason}",
+            stacklevel=2,
+        )
         
         return best_threshold
 
