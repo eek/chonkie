@@ -159,76 +159,45 @@ class SemanticChunker(BaseChunker):
         Returns:
             List of sentences
         """
-        if not text.strip():
+        if not text:
             return []
 
-        # First, mark all delimiters with a special separator
+        # Add separator after each delimiter sequence
         t = text
-        for c in self.delim:
-            t = t.replace(c, c + self.sep)
+        i = 0
+        while i < len(t):
+            # Find end of delimiter sequence
+            j = i
+            while j < len(t) and any(t[j] == d for d in self.delim):
+                j += 1
+            
+            # If we found a delimiter sequence
+            if j > i:
+                # Add separator after the sequence
+                t = t[:j] + self.sep + t[j:]
+                i = j + len(self.sep)
+            else:
+                i += 1
 
-        # Split on separator and filter empty strings
-        raw_splits = t.split(self.sep)
-        
-        # Process each split to maintain original spacing
+        # Initial split
+        splits = [s for s in t.split(self.sep) if s != ""]
+
+        # Combine short splits with previous sentence
         sentences = []
         current = ""
-        
-        for i, split in enumerate(raw_splits):
-            if not split.strip():
-                continue
-            
-            # Find the original delimiter for this split
-            original_delimiter = None
-            for d in self.delim:
-                if d in split:
-                    original_delimiter = d
-                    break
-            
-            # Clean up the split and normalize internal whitespace
-            clean_split = " ".join(split.strip().split())
-            
-            # Always treat as a new sentence
-            if current:
-                sentences.append(current)
-            
-            # Add the current split with its original delimiter
-            if original_delimiter:
-                current = clean_split
-            else:
-                current = clean_split + "."
 
-        # Add final sentence if any
+        for s in splits:
+            if len(s.strip()) < self.min_characters_per_sentence:
+                current += s
+            else:
+                if current:
+                    sentences.append(current)
+                current = s
+
         if current:
             sentences.append(current)
 
-        # Post-process to ensure proper spacing between sentences
-        processed = []
-        for i, sentence in enumerate(sentences):
-            # Find the original delimiter in this sentence
-            delimiter = None
-            for d in self.delim:
-                if sentence.endswith(d):
-                    delimiter = d
-                    break
-            
-            # If no delimiter found, add one
-            if not delimiter:
-                sentence = sentence.rstrip() + "."
-            
-            # Always ensure exactly one space after the sentence if not the last one
-            if i < len(sentences) - 1:
-                sentence = sentence.rstrip() + " "
-            
-            processed.append(sentence)
-
-        # Handle leading/trailing whitespace of the original text
-        if text.startswith(" "):
-            processed[0] = " " + processed[0]
-        if text.endswith(" "):
-            processed[-1] = processed[-1] + " "
-
-        return processed
+        return sentences
 
     def _compute_similarity_threshold(self, all_similarities: List[float]) -> float:
         """Compute similarity threshold based on percentile if specified."""

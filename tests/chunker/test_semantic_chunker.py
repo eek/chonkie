@@ -418,28 +418,36 @@ def test_semantic_chunker_sentence_splitting(embedding_model):
         embedding_model=embedding_model,
         chunk_size=512,
         threshold=0.5,
-        min_characters_per_sentence=3,  # Set a small value for testing
+        min_characters_per_sentence=12,  # Use default value
         verbose=True
     )
 
     # Test various sentence patterns
     texts = [
-        # Basic sentences
+        # Basic sentences (both long enough)
         ("Simple sentence. Another sentence.", 2),
-        # Short fragments that should be kept separate
-        ("Hello. A. B. C. Done.", 5),
-        # Mixed lengths
-        ("Short. A very long sentence here. Final.", 3),
-        # Multiple delimiters
-        ("First! Second? Third.", 3),
-        # Whitespace handling
-        ("   Spaces.    More spaces.   ", 2),
-        # Single sentence
-        ("Just one sentence.", 1),
-        # Extra spaces between sentences
-        ("One.   Two.  Three.", 3),
-        # No space after delimiter
-        ("One.Two.Three.", 3),
+        # Short fragments combined with previous
+        ("Hello world. A. B. C. Done.", 1),
+        # Mixed lengths (all long enough)
+        ("Short text here. A very long sentence here. Final words here.", 3),
+        # Multiple delimiters (all long enough)
+        ("First sentence here! Second one here? Third one here.", 3),
+        # Complex delimiters (all long enough)
+        ("Really long text?! Yes indeed here! No way here?!? Wow amazing!!!", 4),  # Each part > 12 chars
+        # Whitespace handling (both long enough)
+        ("   Spaces here.    More spaces there.   ", 2),
+        # Single sentence (long enough)
+        ("Just one sentence here.", 1),
+        # Extra spaces between sentences (all long enough)
+        ("One long here.   Two more here.  Three final here.", 3),
+        # No space after delimiter (all long enough)
+        ("One long here.Two more here.Three final here.", 3),
+        # Ellipsis handling (both long enough)
+        ("And it's basically here... Next sentence here.", 2),
+        ("First sentence here... Second sentence there...", 2),
+        ("Testing ellipsis here.... Next part is here.", 2),
+        # Mixed delimiters and ellipsis (all parts > 12 chars)
+        ("What happened here?!... No way forward! Really now...? Yes indeed!!!", 4),
     ]
 
     for text, expected_count in texts:
@@ -450,36 +458,9 @@ def test_semantic_chunker_sentence_splitting(embedding_model):
             print(f"  {i}: {sent!r}")
         assert len(sentences) == expected_count, f"Expected {expected_count} sentences, got {len(sentences)}"
 
-        # Normalize whitespace for comparison
-        def normalize_whitespace(s: str) -> str:
-            # Preserve leading/trailing whitespace
-            leading = s[0] if s and s[0].isspace() else ""
-            trailing = s[-1] if s and s[-1].isspace() else ""
-
-            # Split on delimiters and normalize internal whitespace
-            delimiters = ['.', '!', '?']
-            parts = s.strip()
-            for d in delimiters:
-                parts = parts.replace(d, d + '\n')
-            lines = parts.split('\n')
-            normalized = []
-            for line in lines:
-                if not line.strip():
-                    continue
-                words = line.strip().split()
-                if words:
-                    normalized.append(' '.join(words))
-            normalized = '. '.join(normalized)
-
-            # Add back leading/trailing whitespace
-            return leading + normalized + trailing
-
+        # Verify text reconstruction
         reconstructed = "".join(sentences)
-        print(f"Original   : {text!r}")
-        print(f"Normalized : {normalize_whitespace(text)!r}")
-        print(f"Reconstructed: {reconstructed!r}")
-
-        assert normalize_whitespace(text) == normalize_whitespace(reconstructed), "Text reconstruction failed"
+        assert text == reconstructed, "Text reconstruction failed"
 
 if __name__ == "__main__":
     pytest.main()
