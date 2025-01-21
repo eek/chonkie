@@ -150,41 +150,85 @@ class SemanticChunker(BaseChunker):
     ) -> List[str]:
         """Fast sentence splitting while maintaining accuracy.
 
-        This method is faster than using regex for sentence splitting and is more accurate than using the spaCy sentence tokenizer.
+        This method is faster than using regex for sentence splitting and is more accurate 
+        than using the spaCy sentence tokenizer.
 
         Args:
             text: Input text to be split into sentences
-            delim: Delimiters to split sentences on
-            sep: Separator to use when splitting sentences
 
         Returns:
             List of sentences
-
         """
+        if not text.strip():
+            return []
+
+        # First, mark all delimiters with a special separator
         t = text
         for c in self.delim:
             t = t.replace(c, c + self.sep)
 
-        # Initial split
-        splits = [s for s in t.split(self.sep) if s != ""]
-        # print(splits)
-
-        # Combine short splits with previous sentence
+        # Split on separator and filter empty strings
+        raw_splits = t.split(self.sep)
+        
+        # Process each split to maintain original spacing
         sentences = []
         current = ""
-
-        for s in splits:
-            if len(s.strip()) < self.min_characters_per_sentence:
-                current += s
+        
+        for i, split in enumerate(raw_splits):
+            if not split.strip():
+                continue
+            
+            # Find the original delimiter for this split
+            original_delimiter = None
+            for d in self.delim:
+                if d in split:
+                    original_delimiter = d
+                    break
+            
+            # Clean up the split and normalize internal whitespace
+            clean_split = " ".join(split.strip().split())
+            
+            # Always treat as a new sentence
+            if current:
+                sentences.append(current)
+            
+            # Add the current split with its original delimiter
+            if original_delimiter:
+                current = clean_split
             else:
-                if current:
-                    sentences.append(current)
-                current = s
+                current = clean_split + "."
 
+        # Add final sentence if any
         if current:
             sentences.append(current)
 
-        return sentences
+        # Post-process to ensure proper spacing between sentences
+        processed = []
+        for i, sentence in enumerate(sentences):
+            # Find the original delimiter in this sentence
+            delimiter = None
+            for d in self.delim:
+                if sentence.endswith(d):
+                    delimiter = d
+                    break
+            
+            # If no delimiter found, add one
+            if not delimiter:
+                sentence = sentence.rstrip() + "."
+            
+            # Always ensure exactly one space after the sentence if not the last one
+            if i < len(sentences) - 1:
+                sentence = sentence.rstrip() + " "
+            
+            processed.append(sentence)
+
+        # Handle leading/trailing whitespace of the original text
+        if text.startswith(" "):
+            processed[0] = " " + processed[0]
+        if text.endswith(" "):
+            processed[-1] = processed[-1] + " "
+
+        return processed
 
     def _compute_similarity_threshold(self, all_similarities: List[float]) -> float:
         """Compute similarity threshold based on percentile if specified."""
@@ -219,19 +263,17 @@ class SemanticChunker(BaseChunker):
             current_idx = end_idx
 
         # Batch compute embeddings for all sentences
-        # The embeddings are computed assuming a similarity window is applied
-        # There should be len(raw_sentences) number of similarity groups
         sentence_groups = []
+        window_size = self.similarity_window
+        
         for i in range(len(raw_sentences)):
-            group = []
-            # similarity window should consider before and after the current sentence
-            for j in range(i - self.similarity_window, i + self.similarity_window + 1):
-                if j >= 0 and j < len(raw_sentences):
-                    group.append(raw_sentences[j])
+            # Calculate window bounds
+            start = max(0, i - window_size)
+            end = min(len(raw_sentences), i + window_size + 1)
+            
+            # Create group from window
+            group = raw_sentences[start:end]
             sentence_groups.append("".join(group))
-        assert (
-            len(sentence_groups) == len(raw_sentences)
-        ), f"Number of sentence groups ({len(sentence_groups)}) does not match number of raw sentences ({len(raw_sentences)})"
         embeddings = self.embedding_model.embed_batch(sentence_groups)
 
         # Batch compute token counts
@@ -277,22 +319,35 @@ class SemanticChunker(BaseChunker):
             )
 
     def _compute_window_similarities(self, sentences: List[Sentence]) -> List[float]:
-        """Compute all pairwise similarities between sentences."""
-        similarities = [1.0]
-        current_sentence_window = [sentences[0]]
-        window_embedding = sentences[0].embedding
+        """Compute similarities between sentences using a sliding window approach.
+        
+        For each sentence i, computes similarity between its embedding and the
+        combined embedding of the previous similarity_window sentences.
+        """
+        if not sentences:
+            return []
+        
+        similarities = [1.0]  # First sentence always has similarity 1.0
+        
+        # Initialize window with first sentence
+        window = [sentences[0]]
+        
         for i in range(1, len(sentences)):
-            similarities.append(self._get_semantic_similarity(window_embedding, sentences[i].embedding))
+            # Update window - remove oldest if window is full
+            if len(window) >= self.similarity_window:
+                window.pop(0)
+            window.append(sentences[i-1])
             
-            # Update the window embedding
-            if len(current_sentence_window) < self.similarity_window:
-                current_sentence_window.append(sentences[i])
-                window_embedding = self._compute_group_embedding(current_sentence_window)
-            else:
-                current_sentence_window.pop(0)
-                current_sentence_window.append(sentences[i])
-                window_embedding = self._compute_group_embedding(current_sentence_window)
+            # Compute window embedding
+            window_embedding = self._compute_group_embedding(window)
             
+            # Compare current sentence with window
+            similarity = self._get_semantic_similarity(
+                window_embedding,
+                sentences[i].embedding
+            )
+            similarities.append(similarity)
+        
         return similarities
 
     def _get_split_indices(
@@ -306,22 +361,52 @@ class SemanticChunker(BaseChunker):
                 else 0.5
             )
 
-        # get the indices of the sentences that are below the threshold
-        splits = [
-            i + 1
-            for i, s in enumerate(similarities)
-            if s <= threshold and i + 1 < len(similarities)
+        # Include start index
+        splits = [0]
+        
+        # Add split points where similarity drops below threshold
+        for i, similarity in enumerate(similarities[1:], 1):
+            if similarity <= threshold:
+                splits.append(i)
+            
+        # Add end index if not already included
+        if splits[-1] != len(similarities):
+            splits.append(len(similarities))
+        
+        # Filter out splits that would create chunks smaller than min_sentences
+        filtered_splits = [splits[0]]  # Always keep start
+        for i in range(1, len(splits)):
+            if splits[i] - filtered_splits[-1] >= self.min_sentences:
+                filtered_splits.append(splits[i])
+            
+        return filtered_splits
+
+    def _validate_sentence_sizes(self, sentences: List[Sentence]) -> None:
+        """Validate that no individual sentence exceeds the maximum chunk size."""
+        if self.verbose:
+            print("\nValidating sentence sizes:")
+            for i, sent in enumerate(sentences):
+                print(f"Sentence {i}: {sent.token_count} tokens - {sent.text!r}")
+        
+        oversized = [
+            (i, sent) for i, sent in enumerate(sentences)
+            if sent.token_count > self.chunk_size
         ]
-        # add the start and end of the text
-        splits = [0] + splits + [len(similarities)]
-        # check if the splits are valid (i.e. there are enough sentences between them)
-        i = 0
-        while i < len(splits) - 1:
-            if splits[i + 1] - splits[i] < self.min_sentences:
-                splits.pop(i + 1)
-            else:
-                i += 1
-        return splits
+        if oversized:
+            if self.verbose:
+                print(f"\nFound {len(oversized)} oversized sentences!")
+            
+            examples = [
+                f"Sentence {i} ({sent.token_count} tokens): {sent.text[:50]}..."
+                for i, sent in oversized[:3]
+            ]
+            msg = (
+                f"Found {len(oversized)} sentences exceeding maximum chunk size ({self.chunk_size}).\n"
+                f"Example oversized sentences:\n" + "\n".join(examples)
+            )
+            if self.verbose:
+                print(f"Error message:\n{msg}")
+            raise ValueError(msg)
 
     def _calculate_threshold_via_binary_search(
         self, 
@@ -352,16 +437,7 @@ class SemanticChunker(BaseChunker):
         if max_iterations < 1:
             raise ValueError("max_iterations must be at least 1")
         
-        # Validate individual sentence sizes
-        oversized_sentences = [
-            sent for sent in sentences 
-            if sent.token_count > self.chunk_size
-        ]
-        if oversized_sentences:
-            raise ValueError(
-                f"Found {len(oversized_sentences)} sentences exceeding maximum chunk size. "
-                f"Largest sentence has {max(s.token_count for s in oversized_sentences)} tokens."
-            )
+        # Remove oversized sentence validation from here since it's now handled in chunk()
         
         # Compute initial statistics
         similarities = self._compute_window_similarities(sentences)
@@ -621,19 +697,48 @@ class SemanticChunker(BaseChunker):
         if not text.strip():
             return []
 
+        if self.verbose:
+            print("\nStarting chunking process...")
+            print(f"Input text length: {len(text)} characters")
+
         # Prepare sentences with precomputed information
         sentences = self._prepare_sentences(text)
+        if self.verbose:
+            print(f"Split into {len(sentences)} sentences")
+
         if len(sentences) <= self.min_sentences:
+            if self.verbose:
+                print(f"Text has {len(sentences)} sentences (<= min_sentences={self.min_sentences})")
+                print("Returning single chunk")
             return [self._create_chunk(sentences)]
 
+        # Validate sentence sizes
+        if self.verbose:
+            print("\nValidating sentence sizes...")
+        self._validate_sentence_sizes(sentences)
+        
         # Calculate similarity threshold
+        if self.verbose:
+            print("\nCalculating similarity threshold...")
         self.similarity_threshold = self._calculate_similarity_threshold(sentences)
+        if self.verbose:
+            print(f"Using similarity threshold: {self.similarity_threshold}")
 
         # First pass: Group sentences by semantic similarity
+        if self.verbose:
+            print("\nGrouping sentences by semantic similarity...")
         sentence_groups = self._group_sentences(sentences)
+        if self.verbose:
+            print(f"Created {len(sentence_groups)} initial groups")
 
         # Second pass: Split groups into size-appropriate chunks
+        if self.verbose:
+            print("\nSplitting groups into size-appropriate chunks...")
         chunks = self._split_chunks(sentence_groups)
+        if self.verbose:
+            print(f"Final number of chunks: {len(chunks)}")
+            for i, chunk in enumerate(chunks):
+                print(f"Chunk {i}: {chunk.token_count} tokens - {chunk.text!r}")
 
         return chunks
 

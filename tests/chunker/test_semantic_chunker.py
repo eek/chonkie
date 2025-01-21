@@ -295,5 +295,191 @@ def test_semantic_chunker_return_type(embedding_model, sample_text):
     assert all([type(chunk) is str for chunk in chunks])
     assert all([len(tokenizer.encode(chunk)) <= 512 for chunk in chunks])
 
+def test_semantic_chunker_window_boundaries(embedding_model):
+    """Test that the SemanticChunker correctly handles window boundaries."""
+    chunker = SemanticChunker(
+        embedding_model=embedding_model,
+        chunk_size=512,
+        similarity_window=2,
+        threshold=0.5,
+    )
+    
+    # Test with exactly similarity_window + 1 sentences
+    text = "First sentence. Second sentence. Third sentence."
+    chunks = chunker.chunk(text)
+    assert len(chunks) > 0
+    
+    # Test with minimum number of sentences
+    text = "First sentence. Second sentence."
+    chunks = chunker.chunk(text)
+    assert len(chunks) == 1
+
+def test_semantic_chunker_threshold_edge_cases(embedding_model):
+    """Test that the SemanticChunker handles similarity threshold edge cases."""
+    # Test with threshold exactly 0.5
+    chunker = SemanticChunker(
+        embedding_model=embedding_model,
+        chunk_size=512,
+        threshold=0.5,
+    )
+    text = "This is a test. This is another test. This is a third test."
+    chunks = chunker.chunk(text)
+    assert len(chunks) > 0
+    
+    # Test with very high threshold
+    chunker = SemanticChunker(
+        embedding_model=embedding_model,
+        chunk_size=512,
+        threshold=0.99,
+    )
+    chunks = chunker.chunk(text)
+    # Should split more aggressively
+    assert len(chunks) >= len(text.split('.')) - 1
+
+def test_semantic_chunker_near_chunk_size_limit(embedding_model):
+    """Test that the SemanticChunker correctly handles text near chunk size limits."""
+    print("\n=== Testing chunk size limits ===")  # Add visual separator
+    
+    chunker = SemanticChunker(
+        embedding_model=embedding_model,
+        chunk_size=20,  # Small but more realistic chunk size
+        threshold=0.5,
+        min_chunk_size=2,  # Allow smaller chunks for testing
+        verbose=True  # Enable debug output
+    )
+    
+    # Test with sentences of varying lengths - using very explicit text
+    text = (
+        "Short text. "  # ~3-4 tokens
+        "A B C D E F G H. "  # Exactly 8 tokens
+        "A B C D E F G H I J K L M N O P. "  # Exactly 16 tokens
+        "A B C D E F G H I J K L M N O P Q R S T U V W X Y Z. "  # >20 tokens
+    )
+    
+    print("\nInput text:")
+    print(text)
+    
+    # First, let's verify our token counts
+    print("\nPreparing sentences...")
+    sentences = chunker._prepare_sentences(text)
+    print("\nToken counts for each sentence:")
+    for i, sent in enumerate(sentences):
+        print(f"Sentence {i}: {sent.token_count} tokens - {sent.text!r}")
+    
+    # This should raise a ValueError due to the last sentence being too long
+    print("\nAttempting to chunk text (should fail)...")
+    with pytest.raises(ValueError) as exc_info:
+        chunks = chunker.chunk(text)
+    print(f"\nCaught expected error: {str(exc_info.value)}")
+    assert "sentences exceeding maximum chunk size" in str(exc_info.value)
+    
+    # Test with valid sentences - fixed to ensure proper sentence splitting
+    print("\nTesting with valid sentences...")
+    valid_text = (
+        "Short text. "  # ~3-4 tokens
+        "A B C D E F G. "  # 7 tokens
+        "A B C D E. "  # 5 tokens
+    )
+    print("\nValid text:")
+    print(valid_text)
+    
+    chunks = chunker.chunk(valid_text)
+    
+    # Print debug info about chunks
+    print("\nResulting chunks:")
+    for i, chunk in enumerate(chunks):
+        print(f"Chunk {i}: {chunk.token_count} tokens - {chunk.text!r}")
+    
+    # Verify chunk constraints
+    assert all(chunk.token_count <= 20 for chunk in chunks), "Chunks exceed maximum size"
+    assert all(chunk.token_count >= 2 for chunk in chunks), "Chunks below minimum size"
+    
+    # Verify text reconstruction - normalize whitespace for comparison
+    reconstructed = "".join(chunk.text for chunk in chunks)
+    print("\nText reconstruction:")
+    print(f"Original: {valid_text!r}")
+    print(f"Reconstructed: {reconstructed!r}")
+    
+    # Normalize whitespace for comparison
+    def normalize_whitespace(s: str) -> str:
+        # Replace multiple spaces with single space
+        s = ' '.join(s.split())
+        # Ensure single space after sentence delimiters
+        for d in chunker.delim:
+            s = s.replace(d + "  ", d + " ")
+            s = s.replace(d + " ", d + " ")
+        return s
+    
+    assert normalize_whitespace(valid_text) == normalize_whitespace(reconstructed)
+
+def test_semantic_chunker_sentence_splitting(embedding_model):
+    """Test that the SemanticChunker correctly splits sentences."""
+    chunker = SemanticChunker(
+        embedding_model=embedding_model,
+        chunk_size=512,
+        threshold=0.5,
+        min_characters_per_sentence=3,  # Set a small value for testing
+        verbose=True
+    )
+
+    # Test various sentence patterns
+    texts = [
+        # Basic sentences
+        ("Simple sentence. Another sentence.", 2),
+        # Short fragments that should be kept separate
+        ("Hello. A. B. C. Done.", 5),
+        # Mixed lengths
+        ("Short. A very long sentence here. Final.", 3),
+        # Multiple delimiters
+        ("First! Second? Third.", 3),
+        # Whitespace handling
+        ("   Spaces.    More spaces.   ", 2),
+        # Single sentence
+        ("Just one sentence.", 1),
+        # Extra spaces between sentences
+        ("One.   Two.  Three.", 3),
+        # No space after delimiter
+        ("One.Two.Three.", 3),
+    ]
+
+    for text, expected_count in texts:
+        print(f"\nTesting text: {text!r}")
+        sentences = chunker._split_sentences(text)
+        print(f"Split into {len(sentences)} sentences:")
+        for i, sent in enumerate(sentences):
+            print(f"  {i}: {sent!r}")
+        assert len(sentences) == expected_count, f"Expected {expected_count} sentences, got {len(sentences)}"
+
+        # Normalize whitespace for comparison
+        def normalize_whitespace(s: str) -> str:
+            # Preserve leading/trailing whitespace
+            leading = s[0] if s and s[0].isspace() else ""
+            trailing = s[-1] if s and s[-1].isspace() else ""
+
+            # Split on delimiters and normalize internal whitespace
+            delimiters = ['.', '!', '?']
+            parts = s.strip()
+            for d in delimiters:
+                parts = parts.replace(d, d + '\n')
+            lines = parts.split('\n')
+            normalized = []
+            for line in lines:
+                if not line.strip():
+                    continue
+                words = line.strip().split()
+                if words:
+                    normalized.append(' '.join(words))
+            normalized = '. '.join(normalized)
+
+            # Add back leading/trailing whitespace
+            return leading + normalized + trailing
+
+        reconstructed = "".join(sentences)
+        print(f"Original   : {text!r}")
+        print(f"Normalized : {normalize_whitespace(text)!r}")
+        print(f"Reconstructed: {reconstructed!r}")
+
+        assert normalize_whitespace(text) == normalize_whitespace(reconstructed), "Text reconstruction failed"
+
 if __name__ == "__main__":
     pytest.main()
