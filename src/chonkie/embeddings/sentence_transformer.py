@@ -21,12 +21,17 @@ class SentenceTransformerEmbeddings(BaseEmbeddings):
     """
 
     def __init__(
-        self, model: Union[str, "SentenceTransformer"] = "all-MiniLM-L6-v2", **kwargs
+        self, model: Union[str, "SentenceTransformer"] = "all-MiniLM-L6-v2", 
+        prompts: dict = None,
+        default_prompt_name: str = None,
+        **kwargs
     ) -> None:
         """Initialize SentenceTransformerEmbeddings with a sentence-transformers model.
 
         Args:
             model (str): Name of the SentenceTransformer model to load
+            prompts (dict): Optional dictionary of prompt name to prompt text mappings
+            default_prompt_name (str): Optional default prompt name to use for embeddings
             **kwargs: Additional keyword arguments to pass to the SentenceTransformer constructor
 
         Raises:
@@ -47,21 +52,68 @@ class SentenceTransformerEmbeddings(BaseEmbeddings):
 
         if isinstance(model, str):
             self.model_name_or_path = model
+            if prompts:
+                kwargs['prompts'] = prompts
             self.model = SentenceTransformer(self.model_name_or_path, **kwargs)
         elif isinstance(model, SentenceTransformer):
             self.model = model
             self.model_name_or_path = self.model.model_card_data.base_model
+            if prompts:
+                self.model.prompts = prompts
         else:
             raise ValueError("model must be a string or SentenceTransformer instance")
 
+        if default_prompt_name:
+            self.model.default_prompt_name = default_prompt_name
+
         self._dimension = self.model.get_sentence_embedding_dimension()
 
-    def embed(self, text: str) -> "np.ndarray":
-        """Embed a single text using the sentence-transformers model."""
+    @property
+    def default_prompt_name(self) -> str:
+        """Get the default prompt name."""
+        return getattr(self.model, 'default_prompt_name', None)
+
+    @default_prompt_name.setter
+    def default_prompt_name(self, value: str) -> None:
+        """Set the default prompt name."""
+        self.model.default_prompt_name = value
+
+    @property
+    def prompts(self) -> dict:
+        """Get the prompts dictionary."""
+        return getattr(self.model, 'prompts', {})
+
+    @prompts.setter
+    def prompts(self, value: dict) -> None:
+        """Set the prompts dictionary."""
+        self.model.prompts = value
+
+    def embed(self, text: str, prompt_name: str = None) -> "np.ndarray":
+        """Embed a single text using the sentence-transformers model.
+        
+        Args:
+            text: Text to embed
+            prompt_name: Optional prompt name to use for embedding. If not provided and a default_prompt_name
+                       is set, that will be used instead.
+        """
+        if prompt_name:
+            return self.model.encode(text, convert_to_numpy=True, prompt_name=prompt_name)
+        elif self.default_prompt_name:
+            return self.model.encode(text, convert_to_numpy=True, prompt_name=self.default_prompt_name)
         return self.model.encode(text, convert_to_numpy=True)
 
-    def embed_batch(self, texts: List[str]) -> List["np.ndarray"]:
-        """Embed multiple texts using the sentence-transformers model."""
+    def embed_batch(self, texts: List[str], prompt_name: str = None) -> List["np.ndarray"]:
+        """Embed multiple texts using the sentence-transformers model.
+        
+        Args:
+            texts: List of texts to embed
+            prompt_name: Optional prompt name to use for embedding. If not provided and a default_prompt_name
+                       is set, that will be used instead.
+        """
+        if prompt_name:
+            return self.model.encode(texts, convert_to_numpy=True, prompt_name=prompt_name)
+        elif self.default_prompt_name:
+            return self.model.encode(texts, convert_to_numpy=True, prompt_name=self.default_prompt_name)
         return self.model.encode(texts, convert_to_numpy=True)
 
     def embed_as_tokens(self, text: str) -> "np.ndarray":
