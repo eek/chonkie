@@ -606,6 +606,10 @@ class SemanticChunker(BaseChunker):
         else:
             raise ValueError("Invalid return_type. Must be either 'chunks' or 'texts'.")
         
+    def _compute_chunk_embedding(self, chunk: SemanticChunk) -> np.ndarray:
+        """Compute embedding for a chunk by weighted average of its sentence embeddings."""
+        return self._compute_group_embedding(chunk.sentences)
+
     def _split_chunks(
         self, sentence_groups: List[List[Sentence]]
     ) -> List[SemanticChunk]:
@@ -647,6 +651,60 @@ class SemanticChunker(BaseChunker):
             # Create final chunk for this group
             if current_chunk_sentences:
                 chunks.append(self._create_chunk(current_chunk_sentences))
+
+        # Post-process: Combine small chunks with semantically closest neighbor
+        if len(chunks) > 1:
+            i = 0
+            while i < len(chunks):
+                if chunks[i].token_count < self.min_chunk_size:
+                    current_embedding = self._compute_chunk_embedding(chunks[i])
+                    best_similarity = -1
+                    best_merge_index = None
+                    merge_with_next = False
+
+                    # Try next chunk
+                    if i + 1 < len(chunks):
+                        next_chunk = chunks[i + 1]
+                        combined_tokens = chunks[i].token_count + next_chunk.token_count
+                        if combined_tokens <= self.chunk_size:
+                            next_embedding = self._compute_chunk_embedding(next_chunk)
+                            next_similarity = self._get_semantic_similarity(
+                                current_embedding, next_embedding
+                            )
+                            if next_similarity > best_similarity:
+                                best_similarity = next_similarity
+                                best_merge_index = i + 1
+                                merge_with_next = True
+
+                    # Try previous chunk
+                    if i > 0:
+                        prev_chunk = chunks[i - 1]
+                        combined_tokens = chunks[i].token_count + prev_chunk.token_count
+                        if combined_tokens <= self.chunk_size:
+                            prev_embedding = self._compute_chunk_embedding(prev_chunk)
+                            prev_similarity = self._get_semantic_similarity(
+                                current_embedding, prev_embedding
+                            )
+                            if prev_similarity > best_similarity:
+                                best_similarity = prev_similarity
+                                best_merge_index = i - 1
+                                merge_with_next = False
+
+                    # Merge with the most semantically similar neighbor
+                    if best_merge_index is not None:
+                        if merge_with_next:
+                            # Merge with next chunk
+                            merged_sentences = chunks[i].sentences + chunks[best_merge_index].sentences
+                            chunks[i] = self._create_chunk(merged_sentences)
+                            chunks.pop(best_merge_index)
+                        else:
+                            # Merge with previous chunk
+                            merged_sentences = chunks[best_merge_index].sentences + chunks[i].sentences
+                            chunks[best_merge_index] = self._create_chunk(merged_sentences)
+                            chunks.pop(i)
+                            i -= 1
+                        continue
+                i += 1
 
         return chunks
 
@@ -699,6 +757,8 @@ class SemanticChunker(BaseChunker):
         sentence_groups = self._group_sentences(sentences)
         if self.verbose:
             print(f"Created {len(sentence_groups)} initial groups")
+            for i, group in enumerate(sentence_groups):
+                print(f"Group {i}: {len(group)} sentences - {' '.join(s.text for s in group)}")
 
         # Second pass: Split groups into size-appropriate chunks
         if self.verbose:

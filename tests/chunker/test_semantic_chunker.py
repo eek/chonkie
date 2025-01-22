@@ -462,5 +462,142 @@ def test_semantic_chunker_sentence_splitting(embedding_model):
         reconstructed = "".join(sentences)
         assert text == reconstructed, "Text reconstruction failed"
 
+def test_semantic_chunker_merge_small_chunks(embedding_model):
+    """Test that small chunks are merged with their most semantically similar neighbor."""
+    print("\n=== Testing semantic merging of small chunks ===")
+    
+    chunker = SemanticChunker(
+        embedding_model=embedding_model,
+        chunk_size=512,  # Very small chunk size to force splitting
+        min_chunk_size=20,  # Force merging of small chunks
+        threshold=0.8,  # High threshold to force initial splitting
+        mode="window",  # Use window mode for more controlled splitting
+        similarity_window=1,  # Look at immediate neighbors only
+        verbose=True
+    )
+    
+    # Create extensive text with very distinct semantic contexts
+    text = (
+        # Business/Finance context - multiple related sentences
+        "Stock markets trade globally today. "
+        "Investment banks analyze profits. "
+        "Corporate bonds yield returns. "
+        "Financial metrics drive decisions. "
+        "Trading algorithms optimize gains. "
+        "Market analysts study trends. "
+        
+        # Small VC chunk in the middle
+        "I manage venture capital. "
+        "We fund tech startups. "
+        
+        # Entertainment context - multiple related sentences
+        "Hollywood produces blockbuster films. "
+        "Actors perform on Broadway stages. "
+        "Theater shows entertain crowds. "
+        "Movie directors film scenes. "
+        "Audiences applaud performances. "
+        "Drama unfolds on screen. "
+    )
+    
+    print("\nInput text:")
+    print(text)
+    
+    # First get the initial chunks before merging
+    sentences = chunker._prepare_sentences(text)
+    print("\nInitial sentences:")
+    for i, sent in enumerate(sentences):
+        print(f"Sentence {i}: {sent.token_count} tokens - {sent.text!r}")
+    
+    # Get the final chunks
+    chunks = chunker.chunk(text)
+    
+    print("\nFinal chunks after merging:")
+    for i, chunk in enumerate(chunks):
+        print(f"\nChunk {i}: {chunk.token_count} tokens")
+        print(f"Text: {chunk.text!r}")
+        
+        # Print semantic similarities for each chunk
+        if i > 0:
+            prev_sim = chunker._get_semantic_similarity(
+                chunker._compute_chunk_embedding(chunks[i-1]),
+                chunker._compute_chunk_embedding(chunk)
+            )
+            print(f"Similarity with previous chunk: {prev_sim:.3f}")
+        if i < len(chunks) - 1:
+            next_sim = chunker._get_semantic_similarity(
+                chunker._compute_chunk_embedding(chunk),
+                chunker._compute_chunk_embedding(chunks[i+1])
+            )
+            print(f"Similarity with next chunk: {next_sim:.3f}")
+    
+    # Find the chunk containing "venture capital"
+    vc_chunk = None
+    vc_index = None
+    for i, chunk in enumerate(chunks):
+        if "venture capital" in chunk.text:
+            vc_chunk = chunk
+            vc_index = i
+            break
+    
+    assert vc_chunk is not None, "Could not find chunk containing 'venture capital'"
+    
+    # Verify semantic merging - check for multiple terms from each context
+    business_terms = ["stock", "market", "investment", "bank", "corporate", "bond", 
+                     "financial", "trading", "analyst", "profit", "return", "trend"]
+    entertainment_terms = ["hollywood", "actor", "theater", "movie", "film", "stage", 
+                         "perform", "director", "audience", "drama", "screen", "show"]
+    
+    # The VC chunk should contain some business terms but no entertainment terms
+    assert any(term in vc_chunk.text.lower() for term in business_terms), \
+        "Small chunk was not merged with its most semantically similar neighbor (business context)"
+    assert not any(term in vc_chunk.text.lower() for term in entertainment_terms), \
+        "Small chunk was incorrectly merged with less similar neighbor (entertainment context)"
+    
+    # Calculate and verify similarities
+    if len(chunks) > 1:
+        # Get embeddings for each semantic context
+        business_text = (
+            "Stock markets trade globally today. "
+            "Investment banks analyze profits. "
+            "Corporate bonds yield returns. "
+            "Financial metrics drive decisions. "
+            "Trading algorithms optimize gains. "
+            "Market analysts study trends. "
+        )
+        entertainment_text = (
+            "Hollywood produces blockbuster films. "
+            "Actors perform on Broadway stages. "
+            "Theater shows entertain crowds. "
+            "Movie directors film scenes. "
+            "Audiences applaud performances. "
+            "Drama unfolds on screen. "
+        )
+        vc_text = (
+            "I manage venture capital. "
+            "We fund tech startups. "
+        )
+        
+        # Create temporary chunks for similarity comparison
+        business_chunk = chunker._create_chunk(chunker._prepare_sentences(business_text))
+        entertainment_chunk = chunker._create_chunk(chunker._prepare_sentences(entertainment_text))
+        vc_only_chunk = chunker._create_chunk(chunker._prepare_sentences(vc_text))
+        
+        # Calculate similarities
+        business_sim = chunker._get_semantic_similarity(
+            chunker._compute_chunk_embedding(business_chunk),
+            chunker._compute_chunk_embedding(vc_only_chunk)
+        )
+        entertainment_sim = chunker._get_semantic_similarity(
+            chunker._compute_chunk_embedding(entertainment_chunk),
+            chunker._compute_chunk_embedding(vc_only_chunk)
+        )
+        
+        print(f"\nSimilarity scores for VC chunk:")
+        print(f"With business context: {business_sim:.3f}")
+        print(f"With entertainment context: {entertainment_sim:.3f}")
+        
+        assert business_sim > entertainment_sim, \
+            "VC chunk should be more similar to business context than entertainment context"
+
 if __name__ == "__main__":
     pytest.main()
